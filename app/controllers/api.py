@@ -18,10 +18,20 @@ def metrics():
         m = json.load(f)
     # Tu metrics.json trae estas claves desde train.py (accuracy, classification_report, confusion_matrix, best_params)
     # :contentReference[oaicite:3]{index=3}
+
+    curves = None
+    if os.path.exists("artifacts/curves.json"):
+        with open("artifacts/curves.json", "r", encoding="utf-8") as f:
+            curves = json.load(f)
+
     return {
-        "Modelo": "DecisionTreeClassifier",
+        "Modelo": m.get("model"),
         "Accuracy": m.get("accuracy"),
-        "Precision_Recall_F1 (texto)": m.get("classification_report"),
+        "Precision": m.get("precision"),
+        "Recall": m.get("recall"),
+        "F1-Score": m.get("f1"),
+        "ROC_AUC": m.get("roc_auc"),
         "Matriz_de_Confusion": m.get("confusion_matrix"),
-        "Mejores_Hiperparametros": m.get("best_params")
+        "Curvas": curves
+
     }
