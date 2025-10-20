@@ -1,0 +1,14 @@
+# Entorno / dependencias
+venv/
+.env
+__pycache__/
+*.py[cod]
+
+# Datos y artefactos locales
+data/
+artifacts/
+
+# IDE/OS
+.vscode/
+.idea/
+.DS_Store
