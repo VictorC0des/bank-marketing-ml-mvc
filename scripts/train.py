@@ -68,7 +68,7 @@ def load_data(data_path: str, target: str, sep: str | None):
 def build_pipeline(cat_cols, num_cols):
     """Crea el preprocesamiento + clasificador en Pipeline."""
     # Para compatibilidad con scikit-learn <1.2 usa sparse=False (sparse_output en 1.2+)
-    ohe = OneHotEncoder(handle_unknown="ignore", sparse=False)
+    ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
 
     preprocessor = ColumnTransformer(
         transformers=[("ohe", ohe, cat_cols)],
