@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query
 from app.integrations.mongo_repo import latest_training_run, list_training_runs, get_training_run, count_training_runs
-
+from app.models.pipeline import predict_one
+from app.views.responses import InputData
 router = APIRouter(prefix="/api")
 
 @router.get("/metrics/latest")
@@ -47,3 +48,17 @@ def metrics_detail(run_id: str):
     if not doc:
         raise HTTPException(status_code=404, detail=f"run_id {run_id} no encontrado.")
     return doc
+
+@router.post("/predict")
+def predict(payload: InputData):
+    """
+    Predice si el cliente aceptará ('yes'/'no') y la probabilidad de 'yes'.
+    """
+    try:
+        result = predict_one(payload.model_dump())
+        return {
+            "Modelo": "DecisionTreeClassifier",
+            **result
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error en predicción: {e}")    
