@@ -5,8 +5,8 @@ from app.views.responses import InputData
 router = APIRouter(prefix="/api")
 
 @router.get("/metrics/latest")
-def metrics_latest():
-    doc = latest_training_run()
+def metrics_latest(include_curves: bool = Query(True, description="Incluir curvas ROC y PR.")):
+    doc = latest_training_run(include_curves=include_curves)
     if not doc:
         raise HTTPException(status_code=404, detail="No hay métricas registradas. Ejecuta scripts/train.py primero.")
     m = doc.get("metrics", {})
@@ -22,29 +22,34 @@ def metrics_latest():
         "ROC_AUC": m.get("roc_auc"),
         "Matriz_de_Confusion": m.get("confusion_matrix"),
         "Curvas": doc.get("curves"),
-        "Features": doc.get("features_used", []),
         "Params": doc.get("params", {}),
     }
 
 @router.get("/metrics")
-def metrics_list(limit: int = Query(10, ge=1, le=100), page: int = Query(1, ge=1)):
+def metrics_list(
+    limit: int = Query(10, description="Resultados por página. Usa -1 para traer todos."),
+    page: int = Query(1, ge=1, description="Número de página."),
+    include_curves: bool = Query(False, description="Incluir curvas ROC/PR en cada registro.")
+):
     total = count_training_runs()
-    items = list_training_runs(limit=limit, page=page)
-    # opcional: listar sólo metadatos en vez de curvas para la lista
-    for it in items:
-        if "curves" in it:
-            it.pop("curves")  # la lista es más ligera; detalle por id
+    items = list_training_runs(limit=limit, page=page, include_curves=include_curves)
+
+    # Si no queremos curvas en la lista, las quitamos para que sea más ligera
+    if not include_curves:
+        for it in items:
+            it.pop("curves", None)
+
     return {
         "total": total,
         "page": page,
         "limit": limit,
-        "pages": (total + limit - 1) // limit,
+        "pages": 1 if limit <= 0 else (total + limit - 1) // limit,
         "items": items,
     }
 
 @router.get("/metrics/{run_id}")
-def metrics_detail(run_id: str):
-    doc = get_training_run(run_id)
+def metrics_detail(run_id: str, include_curves: bool = Query(True, description="Incluir curvas ROC/PR del modelo específico.")):
+    doc = get_training_run(run_id, include_curves=include_curves)
     if not doc:
         raise HTTPException(status_code=404, detail=f"run_id {run_id} no encontrado.")
     return doc
@@ -56,9 +61,6 @@ def predict(payload: InputData):
     """
     try:
         result = predict_one(payload.model_dump())
-        return {
-            "Modelo": "DecisionTreeClassifier",
-            **result
-        }
+        return {"Modelo": "DecisionTreeClassifier", **result}
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Error en predicción: {e}")    
+        raise HTTPException(status_code=400, detail=f"Error en predicción: {e}")
