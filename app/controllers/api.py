@@ -39,6 +39,9 @@ def metrics_list(
         for it in items:
             it.pop("curves", None)
 
+    for it in items:
+        it.pop("features_used", None)
+
     return {
         "total": total,
         "page": page,
