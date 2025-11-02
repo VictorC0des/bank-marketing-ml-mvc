@@ -7,9 +7,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://127.0.0.1:27017")
-MONGO_DB = os.getenv("MONGO_DB", "bank_ml")
-COL_TRAIN = os.getenv("MONGO_TRAINING_COL", "training_runs")
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB = os.getenv("MONGO_DB")
+COL_TRAIN = os.getenv("MONGO_TRAINING_COL")
 
 _client: Optional[MongoClient] = None
 _coll = None
