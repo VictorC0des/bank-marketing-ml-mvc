@@ -1,27 +1,19 @@
-# app/integrations/mongo_repo.py
-import os, uuid, datetime
+"""Repo Mongo (API): solo lectura de runs de entrenamiento."""
+import os
 from typing import Dict, Any, Optional, List
 from pymongo import MongoClient, DESCENDING
 from dotenv import load_dotenv
 
 load_dotenv()
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://127.0.0.1:27017")
-MONGO_DB = os.getenv("MONGO_DB", "bank_ml")
-COL_TRAIN = os.getenv("MONGO_TRAINING_COL", "training_runs")
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB = os.getenv("MONGO_DB")
+COL_TRAIN = os.getenv("MONGO_TRAINING_COL")
 
 _client = MongoClient(MONGO_URI)
 _db = _client[MONGO_DB]
 _training = _db[COL_TRAIN]
 _training.create_index([("ts", DESCENDING)], name="ts_desc", background=True)
-
-def save_training_run(doc: Dict[str, Any]) -> str:
-    if "run_id" not in doc:
-        doc["run_id"] = str(uuid.uuid4())
-    if "ts" not in doc:
-        doc["ts"] = datetime.datetime.utcnow()
-    _training.insert_one(doc)
-    return doc["run_id"]
 
 def latest_training_run(include_curves: bool = True) -> Optional[Dict[str, Any]]:
     proj = {"_id": 0}
