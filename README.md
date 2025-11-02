@@ -1,18 +1,16 @@
-# 📊 Bank Marketing ML API
+# 📊 Bank Marketing — Single Decision Tree Trainer
 
-API desarrollada con **FastAPI** para predecir si un cliente aceptará una oferta de depósito a plazo, utilizando un modelo de Machine Learning (árbol de decisión) entrenado con el dataset de marketing bancario.
+Entrenador de un único árbol de decisión (sin ensembles) para el dataset clásico de marketing bancario. Guarda el pipeline calibrado, registra métricas en MongoDB y prioriza reproducibilidad.
 
 ---
 
-## 🚀 Descripción general
+## 🚀 ¿Qué incluye?
 
-Este proyecto entrena un modelo con datos de campañas de marketing bancarias y permite:
-
-- Entrenar y evaluar un modelo con nuevos datos (`train.py`).
-- Guardar las métricas generadas en **MongoDB**.
-- Realizar predicciones desde la API.
-- Consultar las métricas más recientes a través de endpoints REST.
-- Probar los endpoints desde **Swagger UI**.
+- Entrenamiento de un único `DecisionTreeClassifier` con One-Hot Encoder de categorías infrecuentes.
+- Tuning activado por defecto (búsqueda aleatoria 80×5) para mejorar el ranking de probabilidades.
+- Calibración por defecto con `sigmoid` para probabilidades más útiles.
+- Umbralización opcional con piso de precisión (útil en modo operativo).
+- Registro de métricas en **MongoDB** y guardado del artefacto en `artifacts/`.
 
 ---
 
@@ -20,53 +18,38 @@ Este proyecto entrena un modelo con datos de campañas de marketing bancarias y 
 
 ```
 bank-marketing-ml-mvc/
-│
-├── app/
-│   ├── controllers/        # Rutas y endpoints (FastAPI)
-│   ├── integrations/       # Conexión con MongoDB
-│   ├── models/             # Esquemas y carga del modelo
-│   ├── main.py             # Punto de entrada de la API
-│
-├── artifacts/              # Modelos entrenados (.joblib)
-│   └── .gitkeep
-│
+├── artifacts/                 # Modelos entrenados (.joblib, con timestamp)
+├── data/
+│   └── bank-full.csv          # Dataset de entrenamiento (separado por ';')
+├── integrations/
+│   ├── featurize.py           # Ingeniería de variables
+│   └── mongo_repo.py          # Registro de métricas en MongoDB
 ├── scripts/
-│   └── train.py            # Entrenamiento y guardado del modelo
-│
-├── data/                   # Dataset CSV (bank-full.csv)
+│   └── train.py               # Entrenamiento principal (CLI)
 ├── requirements.txt
 └── README.md
 ```
 
 ---
 
-## ⚙️ Instalación y ejecución local
+## ⚙️ Instalación (Windows PowerShell)
 
-### 1️⃣ Clonar el repositorio
+1) Crear entorno y activarlo
 
-```bash
-git clone https://github.com/VictorC0des/bank-marketing-ml-mvc.git
-cd bank-marketing-ml-mvc
+```
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 ```
 
-### 2️⃣ Crear entorno virtual
+2) Instalar dependencias
 
-```bash
-python -m venv venv
-venv\Scripts\activate   # En Windows
-# o
-source venv/bin/activate  # En Linux/Mac
+```
+python -m pip install -r requirements.txt
 ```
 
-### 3️⃣ Instalar dependencias
+3) Variables de entorno (MongoDB)
 
-```bash
-pip install -r requirements.txt
-```
-
-### 4️⃣ Configurar variables de entorno
-
-Crea un archivo `.env` en la raíz del proyecto con los datos de tu conexión a MongoDB:
+Crea un archivo `.env` en la raíz del proyecto:
 
 ```
 MONGO_URI=mongodb://localhost:27017
@@ -75,116 +58,120 @@ MONGO_DB=bank_marketing
 
 ---
 
-## 🧠 Entrenamiento del modelo
+## 🧠 Entrenamiento rápido
 
-Ejecuta el script para entrenar y guardar el modelo:
+Con los valores por defecto dejamos listo un modo enfocado a reproducibilidad y buen AP (~0.55 con un solo DT), sin pasar flags:
 
-```bash
+```
 python scripts/train.py
 ```
 
-Esto:
-- Carga el dataset `data/bank-full.csv`
-- Entrena un modelo `DecisionTreeClassifier`
-- Guarda el modelo en `artifacts/decision_tree_model.joblib`
-- Calcula métricas de rendimiento (Accuracy, F1, ROC AUC, etc.)
-- Inserta esas métricas en la base de datos MongoDB.
+Esto hará:
+- Cargar `data/bank-full.csv` (separador `;`).
+- Aplicar ingeniería de variables.
+- Hacer tuning 80×5 del árbol.
+- Calibrar probabilidades con `sigmoid`.
+- Guardar el pipeline en `artifacts/DecisionTree_YYYYMMDD_HHMMSS.joblib`.
+- Registrar métricas en MongoDB.
+
+Métricas esperadas con un único DT (aprox.):
+- average_precision ≈ 0.54–0.56
+- precision/recall dependerán del umbral óptimo interno (optimize=f1 por defecto).
+
+Nota: Por diseño, un solo árbol no alcanza AP≥0.60 de forma robusta en este dataset sin incurrir en leakage o ensembles.
 
 ---
 
-## 🌐 Ejecución de la API
+## � Modos de operación
 
-```bash
-uvicorn app.main:app --reload
+### 1) Modo AP puro (por defecto)
+
+- tuning activado (80×5)
+- calibración: `sigmoid`
+- sin re-muestreo de clases
+- optimize: `f1`
+
+Ejecuta sin flags:
+
+```
+python scripts/train.py
 ```
 
-Luego abre en tu navegador:
+### 2) Modo operativo con piso de precisión (≥ 0.62)
 
-👉 **Swagger UI:** [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+Maximiza el recall sujeto a una precisión mínima, útil cuando los falsos positivos tienen mayor costo.
 
----
+Ejemplo recomendado:
 
-## 📬 Endpoints principales
-
-### 🔹 `POST /api/predict`
-Predice si un cliente aceptará la oferta.
-
-**Ejemplo de cuerpo JSON:**
-```json
-{
-  "age": 41,
-  "job": "admin.",
-  "marital": "married",
-  "education": "tertiary",
-  "default": "no",
-  "balance": 1500,
-  "housing": "yes",
-  "loan": "no",
-  "contact": "cellular",
-  "day": 15,
-  "month": "may",
-  "duration": 200,
-  "campaign": 2,
-  "pdays": -1,
-  "previous": 0,
-  "poutcome": "unknown"
-}
+```
+python scripts/train.py --optimize recall --min-precision 0.62 --resample over --resample-ratio 0.5
 ```
 
-**Respuesta esperada:**
-```json
-{
-  "Modelo": "DecisionTreeClassifier",
-  "Prediction": "yes",
-  "Probability_yes": 0.74
-}
+Observaciones típicas (aprox.):
+- precision ≈ 0.62–0.63
+- recall ≈ 0.35–0.40
+- average_precision ≈ 0.54–0.55
+
+### 3) Evitar leakage por `duration`
+
+`duration` sólo se conoce después de la llamada; para una evaluación realista:
+
+```
+python scripts/train.py --drop-duration
 ```
 
 ---
 
-### 🔹 `GET /api/metrics/latest`
-Devuelve las métricas más recientes almacenadas en MongoDB.
+## � Parámetros principales (CLI)
 
-**Ejemplo de respuesta:**
-```json
-{
-  "Modelo": "DecisionTreeClassifier",
-  "Accuracy": 0.85,
-  "Precision": 0.42,
-  "Recall": 0.68,
-  "F1-Score": 0.52,
-  "ROC_AUC": 0.79
-}
-```
+- `--optimize {f1,fbeta,precision,recall,cost}`: objetivo de umbralización (por defecto: f1).
+- `--min-precision FLOAT`: piso de precisión (omitir por defecto).
+- `--tune-dt` (activado por defecto): habilita tuning del árbol.
+- `--tune-iter INT` (defecto: 80) y `--tune-folds INT` (defecto: 5).
+- `--calibration {sigmoid,isotonic,none}` (defecto: sigmoid).
+- `--resample {none,over,under,smote}` (defecto: none) y `--resample-ratio FLOAT` (defecto: 0.5).
+- `--drop-duration`: elimina columnas de duración (y derivadas) para evitar leakage.
+- `--no-feat`: desactiva la ingeniería de variables interna.
 
 ---
 
-## 🧩 Notas técnicas
+## 🧪 Reproducibilidad
 
-- El modelo y pipeline se entrenan y guardan con `joblib`.
-- Las métricas se guardan automáticamente en MongoDB tras cada entrenamiento.
-- Si se vuelve a ejecutar `train.py`, se sobreescribe el modelo anterior.
-- Las predicciones usan directamente el pipeline guardado, sin preprocesar manualmente.
+- `random_state=42` por defecto y particiones estratificadas.
+- El encoder agrupa categorías infrecuentes para reducir ruido en el ranking.
+- Calibración separada en hold-out para mejorar las probabilidades.
+
+---
+
+## 📌 Notas y límites conocidos
+
+- Requisito cumplido: sólo se usa un `DecisionTreeClassifier` (sin ensembles).
+- En este dataset, AP ≈ 0.55 es un techo razonable con un único árbol y sin leakage.
+- Ensembles (RF/GBM/XGB) mejoran AP, pero no se usan para cumplir la restricción del profesor.
+
+---
+
+## 🗺️ Siguientes pasos (opcionales)
+
+- Exportar el árbol a Graphviz para el informe:
+
+```
+# Ejemplo rápido
+from sklearn import tree
+import joblib
+model = joblib.load('artifacts/DecisionTree_YYYYMMDD_HHMMSS.joblib')
+dt = model.named_steps['model'].base_estimator if hasattr(model, 'named_steps') else model
+# Si calibrado, extraer el estimator subyacente
+if hasattr(dt, 'calibrated_classifiers_'):
+    dt = dt.calibrated_classifiers_[0].estimator
+tree.export_graphviz(dt, out_file='tree.dot', filled=True, feature_names=None)
+```
 
 ---
 
 ## 🧰 Tecnologías
 
-- **FastAPI** — Framework para crear la API.
-- **scikit-learn** — Entrenamiento y evaluación del modelo.
-- **pandas / numpy** — Manipulación de datos.
-- **MongoDB** — Almacenamiento de métricas.
-- **joblib** — Serialización del modelo.
-- **Uvicorn** — Servidor ASGI.
+- scikit-learn, pandas, numpy, scipy, joblib
+- imbalanced-learn
+- pymongo, python-dotenv
 
----
-
-## 🔍 Pruebas con Swagger
-
-Puedes probar los endpoints directamente desde Swagger en:
-
-[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-
-Ahí podrás enviar JSONs de prueba y ver las respuestas del modelo y las métricas.
-
----
