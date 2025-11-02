@@ -20,6 +20,7 @@ def metrics_latest(include_curves: bool = Query(True, description="Incluir curva
         "Recall": m.get("recall"),
         "F1-Score": m.get("f1"),
         "ROC_AUC": m.get("roc_auc"),
+        "Average_Precision": m.get("average_precision"),
         "Matriz_de_Confusion": m.get("confusion_matrix"),
         "Curvas": doc.get("curves"),
         "Params": doc.get("params", {}),
