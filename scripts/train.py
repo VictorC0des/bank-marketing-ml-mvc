@@ -32,8 +32,8 @@ except Exception:
     ImbPipeline = None
     SMOTE = None
     RandomUnderSampler = None
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.tree import DecisionTreeClassifier
 import joblib
 
 # ensure package import when running script
@@ -85,10 +85,11 @@ def load_data(data_path: str, target: str, sep: str | None):
     return df
 
 
-def build_pipeline(cat_cols, num_cols, sampler=None):
-    ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-    preprocessor = ColumnTransformer(transformers=[("ohe", ohe, cat_cols)], remainder="passthrough")
-    clf = RandomForestClassifier(random_state=42, n_jobs=-1)
+def build_pipeline(cat_cols, num_cols, sampler=None, random_state: int = 42):
+    # Use OrdinalEncoder for a single DecisionTree model (keeps pipeline compact)
+    enc = OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1)
+    preprocessor = ColumnTransformer(transformers=[("ord", enc, cat_cols)], remainder="passthrough")
+    clf = DecisionTreeClassifier(random_state=random_state, class_weight=None)
     if sampler is not None and ImbPipeline is not None:
         pipe = ImbPipeline(steps=[("preproc", preprocessor), ("sampler", sampler), ("clf", clf)])
     else:
@@ -96,90 +97,59 @@ def build_pipeline(cat_cols, num_cols, sampler=None):
     return pipe
 
 
-def train_and_evaluate(
+def train_with_preset_decision_tree(
     df: pd.DataFrame,
     target: str = "y",
     test_size: float = 0.2,
     drop_duration: bool = False,
-    use_smote: bool = False,
-    use_undersample: bool = False,
-    n_iter: int = 40,
-    max_estimators: int = 300,
+    random_state: int = 42,
+    preset_params: dict | None = None,
+    decision_threshold: float | None = None,
 ):
+    """Train a single DecisionTree using preset hyperparameters (no RandomizedSearch).
+    Returns the fitted pipeline and a mongo-style doc with metrics.
+    """
     X = df.drop(columns=[target])
     y = df[target]
     if drop_duration and "duration" in X.columns:
         X = X.drop(columns=["duration"])
     cat_cols = X.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
     num_cols = X.select_dtypes(include=["int64", "float64", "int32", "float32"]).columns.tolist()
+
     sampler = None
-    if use_smote:
-        if SMOTE is None:
-            raise RuntimeError("SMOTE requested but imbalanced-learn is not installed. Install with: pip install imbalanced-learn")
-        sampler = SMOTE(random_state=42)
-    if use_undersample:
-        if RandomUnderSampler is None:
-            raise RuntimeError("RandomUnderSampler requested but imbalanced-learn is not installed. Install with: pip install imbalanced-learn")
-        sampler = RandomUnderSampler(random_state=42)
+    pipe = build_pipeline(cat_cols, num_cols, sampler=sampler, random_state=random_state)
 
-    pipe = build_pipeline(cat_cols, num_cols, sampler=sampler)
     stratify = y if y.nunique() > 1 else None
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, stratify=stratify, random_state=42)
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, stratify=stratify, random_state=random_state)
 
-    # split training set for hyperparameter search and calibration
+    # fit the preprocessing and classifier with preset params
+    # apply preset params to the classifier step
+    if preset_params:
+        clf_params = {}
+        # allow both 'clf__param' and 'param' styles
+        for k, v in preset_params.items():
+            if k.startswith("clf__"):
+                clf_params[k.replace("clf__", "")] = v
+            else:
+                clf_params[k] = v
+        # set params on the classifier
+        pipe.named_steps["clf"].set_params(**clf_params)
+
+    pipe.fit(X_train, y_train)
+
+    # optional calibration on 20% of train
     X_train_inner, X_calib, y_train_inner, y_calib = train_test_split(
-        X_train, y_train, test_size=0.2, stratify=y_train, random_state=42
+        X_train, y_train, test_size=0.2, stratify=y_train, random_state=random_state
     )
-
-    # parameter distribution for randomized search; limit n_estimators by max_estimators
-    param_dist = {
-        "clf__n_estimators": [min(50, max_estimators), min(100, max_estimators), max_estimators],
-        "clf__criterion": ["gini", "entropy"],
-        "clf__max_depth": [None, 10, 20, 30],
-        "clf__min_samples_split": [2, 5, 10],
-        "clf__min_samples_leaf": [1, 2, 4],
-        "clf__max_features": ["sqrt", "log2"],
-        "clf__class_weight": [None, "balanced"],
-    }
-
-    cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
-    rs = RandomizedSearchCV(
-        pipe,
-        param_distributions=param_dist,
-        n_iter=n_iter,
-        scoring="f1",
-        cv=cv,
-        n_jobs=-1,
-        verbose=2,
-        random_state=42,
-    )
-
-    # run randomized search on the inner training split
-    rs.fit(X_train_inner, y_train_inner)
-    best = rs.best_estimator_
-
-    # calibrate probabilities using a held-out calibration set for more reliable thresholds
     try:
-        calibrated = CalibratedClassifierCV(best, cv="prefit", method="sigmoid")
+        calibrated = CalibratedClassifierCV(pipe, cv="prefit", method="sigmoid")
         calibrated.fit(X_calib, y_calib)
         model_to_use = calibrated
     except Exception:
-        # if calibration fails for any reason, fall back to the fitted best estimator
-        model_to_use = best
+        model_to_use = pipe
 
-    # use calibrated model if available
     y_prob = model_to_use.predict_proba(X_test)[:, 1]
-    # choose starting threshold 0.5, we'll search for best_f1 below
-    y_pred = (y_prob >= 0.5).astype(int)
-
-    acc = float(accuracy_score(y_test, y_pred))
-    prec = float(precision_score(y_test, y_pred, zero_division=0))
-    rec = float(recall_score(y_test, y_pred, zero_division=0))
-    f1 = float(f1_score(y_test, y_pred, zero_division=0))
-    roc_auc = float(roc_auc_score(y_test, y_prob))
-    avg_prec = float(average_precision_score(y_test, y_prob))
-    cm = confusion_matrix(y_test, y_pred).tolist()
-
+    # default threshold search
     thr_grid = np.linspace(0.05, 0.95, 19)
     best_f1, best_t = -1.0, 0.5
     for t in thr_grid:
@@ -188,36 +158,59 @@ def train_and_evaluate(
         if f1_t > best_f1:
             best_f1, best_t = float(f1_t), float(t)
 
+    if decision_threshold is not None:
+        best_t = float(decision_threshold)
+        best_f1 = float(f1_score(y_test, (y_prob >= best_t).astype(int), zero_division=0))
+
+    y_pred_best = (y_prob >= best_t).astype(int)
+    acc = float(accuracy_score(y_test, y_pred_best))
+    prec = float(precision_score(y_test, y_pred_best, zero_division=0))
+    rec = float(recall_score(y_test, y_pred_best, zero_division=0))
+    f1v = float(f1_score(y_test, y_pred_best, zero_division=0))
+    roc_auc = float(roc_auc_score(y_test, y_prob))
+    avg_prec = float(average_precision_score(y_test, y_prob))
+    cm = confusion_matrix(y_test, y_pred_best).tolist()
+    tn, fp, fn, tp = confusion_matrix(y_test, y_pred_best).ravel()
+
     fpr, tpr, _ = roc_curve(y_test, y_prob)
     pc, rc, _ = precision_recall_curve(y_test, y_prob)
     curves = {"roc_curve": {"fpr": downsample(fpr), "tpr": downsample(tpr)}, "precision_recall_curve": {"precision": downsample(pc), "recall": downsample(rc)}}
 
-    pre = best.named_steps["preproc"]
-    ohe = pre.named_transformers_["ohe"]
-    try:
-        ohe_features = list(ohe.get_feature_names_out(input_features=pre.transformers_[0][2]))
-    except Exception:
+    pre = pipe.named_steps["preproc"]
+    enc_name = None
+    enc_cols = []
+    for name, transformer, cols in pre.transformers_:
+        if name in ("ohe", "ord"):
+            enc_name = name
+            enc_cols = cols
+            break
+    if enc_name is None:
         ohe_features = []
-        cats = getattr(ohe, "categories_", [])
-        cols = pre.transformers_[0][2]
-        for i, col in enumerate(cols):
-            for v in (cats[i] if i < len(cats) else []):
-                ohe_features.append(f"{col}_{v}")
+    else:
+        enc = pre.named_transformers_.get(enc_name)
+        try:
+            ohe_features = list(enc.get_feature_names_out(input_features=enc_cols))
+        except Exception:
+            ohe_features = []
+            cats = getattr(enc, "categories_", [])
+            cols = enc_cols
+            for i, col in enumerate(cols):
+                if cats and i < len(cats):
+                    for v in cats[i]:
+                        ohe_features.append(f"{col}_{v}")
+                else:
+                    ohe_features.append(col)
     feature_names = ohe_features + num_cols
 
-    # compute confusion matrix at the chosen best threshold
-    y_pred_best = (y_prob >= best_t).astype(int)
-    tn, fp, fn, tp = confusion_matrix(y_test, y_pred_best).ravel()
-
     doc = {
-        "model_name": "RandomForestClassifier",
+        "model_name": "DecisionTreeClassifier",
         "model_version": datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S"),
-        "params": rs.best_params_,
+        "params": preset_params or {},
         "metrics": {
             "accuracy": acc,
             "precision": prec,
             "recall": rec,
-            "f1": f1,
+            "f1": f1v,
             "roc_auc": roc_auc,
             "average_precision": avg_prec,
             "confusion_matrix": cm,
@@ -231,28 +224,46 @@ def train_and_evaluate(
         "ts": datetime.datetime.now(datetime.timezone.utc),
     }
 
-    return best, doc
+    return pipe, doc
 
 
 def main(data_path: str, output_dir: str = "artifacts", target: str = "y", test_size: float = 0.2, sep: str | None = None, drop_duration: bool = False):
     print("Cargando datos:", data_path)
     df = load_data(data_path, target, sep)
-    print("Entrenando modelo (RandomForest + RandomizedSearchCV)...")
-    # default: no sampling, n_iter and max_estimators will be taken from args in __main__ wrapper
-    best_model, mongo_doc = train_and_evaluate(
-        df=df, target=target, test_size=test_size, drop_duration=drop_duration
+    print("Entrenando modelo con parámetros predefinidos (DecisionTree)...")
+    # preset params (reproduced best run) — these are applied directly to the DecisionTree
+    preset = {
+        "clf__criterion": "gini",
+        "clf__max_depth": None,
+        "clf__min_samples_split": 10,
+        "clf__min_samples_leaf": 16,
+        "clf__max_features": None,
+        "clf__class_weight": None,
+        "clf__ccp_alpha": 0.0001,
+    }
+    # decision threshold default from env if present
+    decision_threshold = None
+    dt_env_thr = os.getenv("DECISION_THRESHOLD")
+    if dt_env_thr is not None and dt_env_thr != "":
+        try:
+            decision_threshold = float(dt_env_thr)
+        except Exception:
+            decision_threshold = None
+
+    best_model, mongo_doc = train_with_preset_decision_tree(
+        df=df, target=target, test_size=test_size, drop_duration=drop_duration, random_state=42, preset_params=preset, decision_threshold=decision_threshold
     )
     artifacts = Path(output_dir)
     artifacts.mkdir(parents=True, exist_ok=True)
-    # name the model file with model name and version so it reflects the trained estimator
     model_path = artifacts / f"{mongo_doc['model_name']}_{mongo_doc['model_version']}.joblib"
     joblib.dump(best_model, model_path)
     print(f"Modelo guardado en: {model_path}")
+    # save run to Mongo (keeps historical record); remove if you prefer not to persist
     run_id = save_training_run(mongo_doc)
     print("Métricas insertadas en MongoDB (training_runs).")
     print(f"   run_id: {run_id}")
     m = mongo_doc["metrics"]
-    print(json.dumps({"accuracy": m["accuracy"], "precision": m["precision"], "recall": m["recall"], "f1": m["f1"], "roc_auc": m["roc_auc"], "average_precision": m["average_precision"], "best_threshold": m["thresholds"]["best_f1"]}, indent=2))
+    print(json.dumps({"accuracy": m["accuracy"], "precision": m["precision"], "recall": m["recall"], "f1": m["f1"], "roc_auc": m["roc_auc"], "average_precision": m["average_precision"], "best_threshold": m["decision_threshold"]}, indent=2))
 
 
 if __name__ == "__main__":
@@ -280,25 +291,6 @@ if __name__ == "__main__":
     parser.add_argument("--n-iter", type=int, default=n_iter_default, help="Número de iteraciones para RandomizedSearchCV (más bajo = más rápido).")
     parser.add_argument("--max-estimators", type=int, default=max_estimators_default, help="Valor máximo para n_estimators en la búsqueda.")
     args = parser.parse_args()
-    # run training with args by calling train_and_evaluate directly so we pass sampler flags
-    print("Ejecutando entrenamiento final con configuración solicitada...")
-    best_model, mongo_doc = train_and_evaluate(
-        df=load_data(args.data_path, args.target, args.sep),
-        target=args.target,
-        test_size=args.test_size,
-        drop_duration=args.drop_duration,
-        use_smote=args.use_smote,
-        use_undersample=args.use_undersample,
-        n_iter=args.n_iter,
-        max_estimators=args.max_estimators,
-    )
-    artifacts = Path(args.output_dir)
-    artifacts.mkdir(parents=True, exist_ok=True)
-    model_path = artifacts / f"{mongo_doc['model_name']}_{mongo_doc['model_version']}.joblib"
-    joblib.dump(best_model, model_path)
-    print(f"Modelo guardado en: {model_path}")
-    run_id = save_training_run(mongo_doc)
-    print("Métricas insertadas en MongoDB (training_runs).")
-    print(f"   run_id: {run_id}")
-    m = mongo_doc["metrics"]
-    print(json.dumps({"accuracy": m["accuracy"], "precision": m["precision"], "recall": m["recall"], "f1": m["f1"], "roc_auc": m["roc_auc"], "average_precision": m["average_precision"], "best_threshold": m["thresholds"]["best_f1"]}, indent=2))
+    # By default run the simplified preset DecisionTree trainer (no hyper-search)
+    print("Ejecutando entrenamiento final (preset DecisionTree)...")
+    main(data_path=args.data_path, output_dir=args.output_dir, target=args.target, test_size=args.test_size, sep=args.sep, drop_duration=args.drop_duration)
