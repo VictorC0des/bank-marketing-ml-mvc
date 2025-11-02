@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.compose import ColumnTransformer
-from sklearn.metrics import accuracy_score, average_precision_score, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import accuracy_score, average_precision_score, f1_score, precision_score, recall_score, roc_auc_score, precision_recall_curve, roc_curve
 from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OrdinalEncoder, OneHotEncoder
@@ -155,6 +155,20 @@ def train(data_path: str, output_dir: str, test_size: float, random_state: int, 
         pass
 
     y_prob = fitted_model.predict_proba(X_test)[:, 1]
+    # Curvas ROC y PR (downsample para guardar en Mongo sin saturar)
+    def _downsample(arr, n=200):
+        arr = np.asarray(arr)
+        if arr.size <= n:
+            return arr.tolist()
+        idx = np.linspace(0, arr.size - 1, n).astype(int)
+        return arr[idx].tolist()
+
+    fpr, tpr, _ = roc_curve(y_test, y_prob)
+    pr_precision, pr_recall, _ = precision_recall_curve(y_test, y_prob)
+    curves = {
+        "roc_curve": {"fpr": _downsample(fpr), "tpr": _downsample(tpr)},
+        "precision_recall_curve": {"precision": _downsample(pr_precision), "recall": _downsample(pr_recall)},
+    }
     # Búsqueda del mejor umbral
     best_threshold = 0.5
     best_score = -1.0
@@ -260,6 +274,7 @@ def train(data_path: str, output_dir: str, test_size: float, random_state: int, 
         "model_version": model_name,
         "params": {"class_weight": "balanced"},
         "metrics": metrics,
+        "curves": curves,
         "ts": datetime.datetime.now(datetime.timezone.utc),
     }
     run_id = save_training_run(record)
