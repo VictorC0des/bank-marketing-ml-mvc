@@ -5,6 +5,7 @@ __pycache__/
 *.py[cod]
 artifacts/*.joblib
 artifacts/*.pkl
+data/bank-full-augmented.csv
 
 
 
