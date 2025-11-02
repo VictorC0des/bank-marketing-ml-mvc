@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Entrena un único árbol de decisión y guarda un pipeline calibrado (enfocado en AP)."""
 from pathlib import Path
+import shutil
 import argparse
 import json
 import datetime
@@ -12,9 +13,11 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
+from pymongo import MongoClient
+import gridfs
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.compose import ColumnTransformer
-from sklearn.metrics import accuracy_score, average_precision_score, f1_score, precision_score, recall_score, roc_auc_score, precision_recall_curve, roc_curve
+from sklearn.metrics import accuracy_score, average_precision_score, f1_score, precision_score, recall_score, roc_auc_score
 from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OrdinalEncoder, OneHotEncoder
@@ -71,7 +74,9 @@ def train(data_path: str, output_dir: str, test_size: float, random_state: int, 
           optimize: str = "f1", beta: float = 1.0,
           min_precision: float | None = None, cost_fp: float | None = None, cost_fn: float | None = None,
           drop_duration: bool = False, tune_dt: bool = False, tune_scoring: str = "f1", tune_iter: int = 30, tune_folds: int = 3, pos_weight: float | None = None,
-          calibration: str = "isotonic", resample: str = "over", resample_ratio: float = 0.5):
+          calibration: str = "isotonic", resample: str = "over", resample_ratio: float = 0.5,
+          artifact_alias: str = "model_latest.joblib",
+          upload_gridfs: bool = True):
     load_dotenv()
     data = load_dataset(data_path, sep)
 
@@ -155,20 +160,6 @@ def train(data_path: str, output_dir: str, test_size: float, random_state: int, 
         pass
 
     y_prob = fitted_model.predict_proba(X_test)[:, 1]
-    # Curvas ROC y PR (downsample para guardar en Mongo sin saturar)
-    def _downsample(arr, n=200):
-        arr = np.asarray(arr)
-        if arr.size <= n:
-            return arr.tolist()
-        idx = np.linspace(0, arr.size - 1, n).astype(int)
-        return arr[idx].tolist()
-
-    fpr, tpr, _ = roc_curve(y_test, y_prob)
-    pr_precision, pr_recall, _ = precision_recall_curve(y_test, y_prob)
-    curves = {
-        "roc_curve": {"fpr": _downsample(fpr), "tpr": _downsample(tpr)},
-        "precision_recall_curve": {"precision": _downsample(pr_precision), "recall": _downsample(pr_recall)},
-    }
     # Búsqueda del mejor umbral
     best_threshold = 0.5
     best_score = -1.0
@@ -267,19 +258,59 @@ def train(data_path: str, output_dir: str, test_size: float, random_state: int, 
     model_label = "DecisionTree"
     model_name = f"{model_label}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
     artifact_path = output_path / f"{model_name}.joblib"
-    joblib.dump(packaged_model, artifact_path)
+    # Guarda con compresión moderada y alias estable para consumo por la API
+    joblib.dump(packaged_model, artifact_path, compress=3)
+    alias_path = output_path / artifact_alias
+    try:
+        shutil.copyfile(artifact_path, alias_path)
+    except Exception:
+        alias_path = None
 
+    # Subir artefacto a Mongo GridFS (opcional si hay conexión)
+    fs_id_str = None
+    if upload_gridfs:
+        try:
+            mongo_uri = os.getenv("MONGO_URI")
+            mongo_db = os.getenv("MONGO_DB")
+            if not mongo_uri or not mongo_db:
+                print("[GridFS] MONGO_URI/MONGO_DB no configurados; omitido.")
+            elif not artifact_path.exists():
+                print("[GridFS] Artefacto no encontrado; omitido.")
+            else:
+                print("[GridFS] Subiendo artefacto a GridFS…")
+                client = MongoClient(mongo_uri)
+                db = client[mongo_db]
+                fs = gridfs.GridFS(db)
+                with open(artifact_path, "rb") as f:
+                    fs_id = fs.put(
+                        f,
+                        filename=str(artifact_path.name),
+                        alias=str(alias_path.name) if alias_path else None,
+                        contentType="application/octet-stream",
+                    )
+                    fs_id_str = str(fs_id)
+                print("[GridFS] Subido con fs_id:", fs_id_str)
+        except Exception as e:
+            print("[GridFS] Error al subir a GridFS:", e)
+            fs_id_str = None
+
+    # Registro para Mongo: incluye rutas del artefacto
     record = {
         "model_name": model_label,
         "model_version": model_name,
         "params": {"class_weight": "balanced"},
         "metrics": metrics,
-        "curves": curves,
+        "artifact_path": str(artifact_path.resolve()),
+        "artifact_alias": str(alias_path.resolve()) if alias_path else None,
+        "artifact_size_bytes": int(artifact_path.stat().st_size) if artifact_path.exists() else None,
+        "artifact_fs_id": fs_id_str,
         "ts": datetime.datetime.now(datetime.timezone.utc),
     }
     run_id = save_training_run(record)
 
     print("Model saved:", artifact_path)
+    if alias_path:
+        print("Alias updated:", alias_path)
     print("run_id:", run_id)
     print(json.dumps(metrics, indent=2))
 
@@ -291,6 +322,8 @@ def parse_args():
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--random-state", type=int, default=int(os.getenv("RANDOM_STATE", 42)))
     parser.add_argument("--sep", default=os.getenv("CSV_SEP", ";"))
+    parser.add_argument("--artifact-alias", default=os.getenv("ARTIFACT_ALIAS", "model_latest.joblib"), help="Nombre de alias estable del modelo dentro de OUTPUT_DIR")
+    parser.add_argument("--upload-gridfs", action="store_true", default=(os.getenv("UPLOAD_GRIDFS", "true").lower() == "true"), help="Sube el modelo a Mongo GridFS (requiere MONGO_URI/MONGO_DB)")
     parser.add_argument("--no-feat", action="store_true", help="Disable internal featurization before training")
     parser.add_argument("--optimize", choices=["f1", "fbeta", "precision", "recall", "cost"], default=os.getenv("OPTIMIZE", "f1"))
     parser.add_argument("--beta", type=float, default=float(os.getenv("BETA", 1.0)), help="Beta for F-beta optimization")
@@ -332,4 +365,6 @@ if __name__ == "__main__":
         calibration=(None if arguments.calibration == "none" else arguments.calibration),
         resample=arguments.resample,
         resample_ratio=arguments.resample_ratio,
+        artifact_alias=arguments.artifact_alias,
+        upload_gridfs=arguments.upload_gridfs,
     )
