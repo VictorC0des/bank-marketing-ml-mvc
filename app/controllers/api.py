@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query
-from app.integrations.mongo_repo import latest_training_run, list_training_runs, get_training_run, count_training_runs
+from integrations.mongo_repo import latest_training_run, list_training_runs, get_training_run, count_training_runs
 from app.models.pipeline import predict_one, refresh_model, model_info
 from app.views.responses import InputData
 router = APIRouter(prefix="/api")

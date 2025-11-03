@@ -8,7 +8,7 @@ from pymongo import MongoClient
 import gridfs
 from bson import ObjectId
 from dotenv import load_dotenv
-from app.integrations.mongo_repo import latest_artifact_info, artifact_info_by_run
+from integrations.mongo_repo import latest_artifact_info, artifact_info_by_run
 
 load_dotenv()
 
@@ -18,7 +18,7 @@ try:
     if ROOT_DIR not in sys.path:
         sys.path.insert(0, ROOT_DIR)
     # Importa la versión canónica y permite que registre el alias 'integrations.featurize'
-    import app.integrations.featurize  # noqa: F401
+    import integrations.featurize  # noqa: F401
 except Exception:
     # Intento secundario: si falla, intenta el path antiguo
     try:
