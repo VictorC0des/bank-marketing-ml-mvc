@@ -3,7 +3,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.controllers.api import router as api_router
 
-app = FastAPI(title="Bank Marketing DecisionTree API", version="1.0")
+# Deshabilita documentación pública (Swagger/Redoc/OpenAPI) permanentemente
+app = FastAPI(
+    title="Bank Marketing DecisionTree API",
+    version="1.0",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
+)
 
 # Configuración CORS por entorno
 _allow_origins_env = os.getenv("ALLOW_ORIGINS", "*")
