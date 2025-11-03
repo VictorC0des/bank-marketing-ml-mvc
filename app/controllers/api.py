@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query
 from app.integrations.mongo_repo import latest_training_run, list_training_runs, get_training_run, count_training_runs
-from app.models.pipeline import predict_one
+from app.models.pipeline import predict_one, refresh_model, model_info
 from app.views.responses import InputData
 router = APIRouter(prefix="/api")
 
@@ -68,3 +68,16 @@ def predict(payload: InputData):
         return {"Modelo": "DecisionTreeClassifier", **result}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error en predicción: {e}")
+
+
+@router.get("/model/refresh")
+def model_refresh(run_id: str | None = Query(default=None, description="Opcional: forzar cargar artefacto de un run_id específico.")):
+    """Descarga/carga el modelo más reciente (o por run_id) desde GridFS/alias y devuelve el origen."""
+    meta = refresh_model(run_id)
+    return {"status": "ok", **meta}
+
+
+@router.get("/model/health")
+def model_health():
+    """Devuelve estado del modelo cargado y rutas disponibles."""
+    return model_info()
