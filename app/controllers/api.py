@@ -1,6 +1,42 @@
 from fastapi import APIRouter, HTTPException, Query
 from integrations.mongo_repo import latest_training_run, list_training_runs, get_training_run, count_training_runs
 from app.models.pipeline import predict_one, refresh_model, model_info
+import math
+import numbers
+from datetime import date, datetime
+try:
+    from bson import ObjectId
+except Exception:  # pragma: no cover
+    ObjectId = None  # type: ignore
+
+
+def _sanitize_for_json(obj):
+    """Convierte NaN/Inf a None y numpy arrays a listas, recursivamente."""
+    # numpy arrays/Series con tolist
+    if hasattr(obj, "tolist"):
+        return _sanitize_for_json(obj.tolist())
+    # ObjectId
+    if ObjectId is not None and isinstance(obj, ObjectId):
+        return str(obj)
+    # datetime/date
+    if isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    # dict
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    # list/tuple
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(x) for x in obj]
+    # números (incluye numpy.number)
+    if isinstance(obj, numbers.Number):
+        try:
+            x = float(obj)
+            if not math.isfinite(x):
+                return None
+            return x if isinstance(obj, float) else obj
+        except Exception:
+            return None
+    return obj
 from app.views.responses import InputData
 router = APIRouter(prefix="/api")
 
@@ -9,22 +45,8 @@ def metrics_latest(include_curves: bool = Query(True, description="Incluir curva
     doc = latest_training_run(include_curves=include_curves)
     if not doc:
         raise HTTPException(status_code=404, detail="No hay métricas registradas. Ejecuta scripts/train.py primero.")
-    m = doc.get("metrics", {})
-    return {
-        "run_id": doc.get("run_id"),
-        "ts": doc.get("ts"),
-        "Modelo": doc.get("model_name"),
-        "Version": doc.get("model_version"),
-        "Accuracy": m.get("accuracy"),
-        "Precision": m.get("precision"),
-        "Recall": m.get("recall"),
-        "F1-Score": m.get("f1"),
-        "ROC_AUC": m.get("roc_auc"),
-        "Average_Precision": m.get("average_precision"),
-        "Matriz_de_Confusion": m.get("confusion_matrix"),
-        "Curvas": doc.get("curves"),
-        "Params": doc.get("params", {}),
-    }
+    # Devuelve el documento tal cual se guarda en Mongo (con _id), sanitizado para JSON
+    return _sanitize_for_json(doc if include_curves else {**doc, "curves": None})
 
 @router.get("/metrics")
 def metrics_list(
@@ -56,7 +78,7 @@ def metrics_detail(run_id: str, include_curves: bool = Query(True, description="
     doc = get_training_run(run_id, include_curves=include_curves)
     if not doc:
         raise HTTPException(status_code=404, detail=f"run_id {run_id} no encontrado.")
-    return doc
+    return _sanitize_for_json(doc)
 
 @router.post("/predict")
 def predict(payload: InputData):
