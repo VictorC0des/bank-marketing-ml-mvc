@@ -17,7 +17,16 @@ from pymongo import MongoClient
 import gridfs
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.compose import ColumnTransformer
-from sklearn.metrics import accuracy_score, average_precision_score, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    precision_recall_curve,
+    roc_curve,
+)
 from sklearn.model_selection import train_test_split, RandomizedSearchCV, StratifiedKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, OrdinalEncoder, OneHotEncoder
@@ -244,6 +253,34 @@ def train(data_path: str, output_dir: str, test_size: float, random_state: int, 
         "precision_target_met": bool(precision_target_met),
     }
 
+    # Curvas (ROC y PR) con downsampling para almacenamiento
+    def _downsample(arr: np.ndarray, max_points: int = 200) -> list:
+        if arr is None:
+            return []
+        n = len(arr)
+        if n <= max_points:
+            return [float(x) for x in arr]
+        step = max(1, n // max_points)
+        return [float(x) for x in arr[::step]]
+
+    # ROC
+    fpr, tpr, thr_roc = roc_curve(y_test, y_prob)
+    # PR (nota: thresholds tiene len = len(precision)-1)
+    precision_arr, recall_arr, thr_pr = precision_recall_curve(y_test, y_prob)
+
+    curves = {
+        "roc": {
+            "fpr": _downsample(fpr),
+            "tpr": _downsample(tpr),
+            "thresholds": _downsample(thr_roc),
+        },
+        "pr": {
+            "precision": _downsample(precision_arr),
+            "recall": _downsample(recall_arr),
+            "thresholds": _downsample(thr_pr),
+        },
+    }
+
     # Empaqueta featurización + modelo para aceptar datos crudos
     packaged_model = fitted_model
     if not no_feat:
@@ -300,6 +337,7 @@ def train(data_path: str, output_dir: str, test_size: float, random_state: int, 
         "model_version": model_name,
         "params": {"class_weight": "balanced"},
         "metrics": metrics,
+        "curves": curves,
         "artifact_path": str(artifact_path.resolve()),
         "artifact_alias": str(alias_path.resolve()) if alias_path else None,
         "artifact_size_bytes": int(artifact_path.stat().st_size) if artifact_path.exists() else None,
