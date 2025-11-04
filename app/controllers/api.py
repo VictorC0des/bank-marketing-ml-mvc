@@ -65,13 +65,15 @@ def metrics_list(
     for it in items:
         it.pop("features_used", None)
 
-    return {
+    response_payload = {
         "total": total,
         "page": page,
         "limit": limit,
         "pages": 1 if limit <= 0 else (total + limit - 1) // limit,
         "items": items,
     }
+
+    return _sanitize_for_json(response_payload)
 
 @router.get("/metrics/{run_id}")
 def metrics_detail(run_id: str, include_curves: bool = Query(True, description="Incluir curvas ROC/PR del modelo específico.")):
