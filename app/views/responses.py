@@ -1,6 +1,13 @@
 from pydantic import BaseModel, Field
 from typing import Literal
+from enum import Enum
 
+# ===== Tipos de Modelos =====
+class ModelType(str, Enum):
+    DECISION_TREE = "decision_tree"
+    DEEP_LEARNING = "deep_learning"
+
+# ===== Tipos de Entrada =====
 Job = Literal["admin.","blue-collar","entrepreneur","housemaid","management",
               "retired","self-employed","services","student","technician",
               "unemployed","unknown"]

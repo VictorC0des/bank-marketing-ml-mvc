@@ -26,28 +26,33 @@ except Exception:
     except Exception:
         pass
 
+# ===== CONFIGURACIÓN PARA MACHINE LEARNING (Decision Tree) =====
 PIPELINE_PATH = os.getenv("PIPELINE_PATH", "artifacts/decision_tree_model.joblib")
 MODEL_CACHE_PATH = os.getenv("MODEL_CACHE_PATH", "artifacts/model_cached.joblib")
-_model_cache = None
-_model_meta = {"source": None, "path": None, "run_id": None}
 
-def _download_from_gridfs(cache_path: str) -> bool:
-    """Descarga el último modelo desde GridFS a cache_path. Devuelve True si tuvo éxito."""
-    info = latest_artifact_info()
-    if not info:
-        return False
-    fs_id = info.get("artifact_fs_id")
-    # Si no hay fs_id pero existe artifact_alias local, úsalo como fallback local
+# ===== CONFIGURACIÓN PARA DEEP LEARNING (Neural Network) =====
+DEEPLEARNING_MODEL_PATH = os.getenv("DEEPLEARNING_MODEL_PATH", "artifacts/deep_learning_model.h5")
+DEEPLEARNING_MODEL_CACHE_PATH = os.getenv("DEEPLEARNING_MODEL_CACHE_PATH", "artifacts/dl_model_cached.h5")
+DEEPLEARNING_SCALER_PATH = os.getenv("DEEPLEARNING_SCALER_PATH", "artifacts/dl_scaler.joblib")
+DEEPLEARNING_SCALER_CACHE_PATH = os.getenv("DEEPLEARNING_SCALER_CACHE_PATH", "artifacts/dl_scaler_cached.joblib")
+DEEPLEARNING_ENCODER_PATH = os.getenv("DEEPLEARNING_ENCODER_PATH", "artifacts/dl_encoder.joblib")
+DEEPLEARNING_ENCODER_CACHE_PATH = os.getenv("DEEPLEARNING_ENCODER_CACHE_PATH", "artifacts/dl_encoder_cached.joblib")
+
+# ===== CACHÉS GLOBALES SEPARADOS POR TIPO =====
+# Machine Learning
+_model_cache_ml = None
+_model_meta_ml = {"source": None, "path": None, "run_id": None}
+
+# Deep Learning
+_model_cache_dl = None
+_scaler_cache_dl = None
+_encoder_cache_dl = None
+_model_meta_dl = {"source": None, "path": None, "run_id": None}
+
+
+def _download_from_gridfs(cache_path: str, fs_id: str = None) -> bool:
+    """Descarga un artefacto desde GridFS a cache_path. Devuelve True si tuvo éxito."""
     if not fs_id:
-        alias = info.get("artifact_alias")
-        if alias and os.path.exists(alias):
-            try:
-                mdl = joblib.load(alias)
-                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
-                joblib.dump(mdl, cache_path)
-                return True
-            except Exception:
-                return False
         return False
 
     mongo_uri = os.getenv("MONGO_URI")
@@ -74,95 +79,250 @@ def _download_from_gridfs(cache_path: str) -> bool:
         return False
 
 
-def refresh_model(run_id: str | None = None) -> dict:
-    """Fuerza la recarga del modelo: baja el más reciente (o por run_id) desde GridFS o usa alias local."""
-    global _model_cache, _model_meta
-    info = artifact_info_by_run(run_id) if run_id else latest_artifact_info()
-    if not info:
-        raise HTTPException(status_code=404, detail="No hay runs de entrenamiento con artefactos.")
+# ============================================================================
+# MACHINE LEARNING (Decision Tree) - FUNCIONES
+# ============================================================================
 
-    fs_id = info.get("artifact_fs_id")
-    alias = info.get("artifact_alias")
-
-    # Intenta GridFS primero
-    mongo_uri = os.getenv("MONGO_URI")
-    mongo_db = os.getenv("MONGO_DB")
-    if fs_id and mongo_uri and mongo_db:
-        try:
-            # Convertir a ObjectId si viene como str
-            if isinstance(fs_id, str):
-                try:
-                    fs_id = ObjectId(fs_id)
-                except Exception:
-                    pass
-            client = MongoClient(mongo_uri)
-            db = client[mongo_db]
-            fs = gridfs.GridFS(db)
-            grid_out = fs.get(fs_id)
-            data = grid_out.read()
-            os.makedirs(os.path.dirname(MODEL_CACHE_PATH), exist_ok=True)
-            with open(MODEL_CACHE_PATH, "wb") as f:
-                f.write(data)
-            _model_cache = joblib.load(MODEL_CACHE_PATH)
-            _model_meta = {"source": "gridfs", "path": MODEL_CACHE_PATH, "run_id": info.get("run_id")}
-            return _model_meta
-        except Exception:
-            pass
-
-    # Fallback: alias local si existe
-    if alias and os.path.exists(alias):
-        try:
-            os.makedirs(os.path.dirname(MODEL_CACHE_PATH), exist_ok=True)
-            shutil.copyfile(alias, MODEL_CACHE_PATH)
-        except Exception:
-            # Si falla la copia, igual intentamos cargar desde alias directamente
-            pass
-        try:
-            _model_cache = joblib.load(MODEL_CACHE_PATH if os.path.exists(MODEL_CACHE_PATH) else alias)
-            _model_meta = {"source": "alias", "path": (MODEL_CACHE_PATH if os.path.exists(MODEL_CACHE_PATH) else alias), "run_id": info.get("run_id")}
-            return _model_meta
-        except Exception:
-            pass
-
-    raise HTTPException(status_code=500, detail="No se pudo cargar el modelo (GridFS/alias no disponibles).")
-
-def load_model():
-    global _model_cache, _model_meta
-    if _model_cache is None:
+def load_model_ml():
+    """Carga el modelo Decision Tree más reciente. Usa archivo local o descarga desde GridFS."""
+    global _model_cache_ml, _model_meta_ml
+    if _model_cache_ml is None:
         path = PIPELINE_PATH
         if os.path.exists(path):
-            _model_cache = joblib.load(path)
-            _model_meta.update({"source": "file", "path": path})
+            _model_cache_ml = joblib.load(path)
+            _model_meta_ml.update({"source": "file", "path": path})
         else:
-            ok = _download_from_gridfs(MODEL_CACHE_PATH)
-            if not ok or not os.path.exists(MODEL_CACHE_PATH):
-                # Como último recurso, intenta refresh_model() que contempla alias
-                meta = refresh_model()
-                _model_meta.update(meta)
-                return _model_cache
-            _model_cache = joblib.load(MODEL_CACHE_PATH)
-            _model_meta.update({"source": "gridfs", "path": MODEL_CACHE_PATH})
-    return _model_cache
+            # Intenta descargar desde GridFS - buscar el modelo Decision Tree más reciente
+            from integrations.mongo_repo import latest_artifact_info_by_type
+            info = latest_artifact_info_by_type(model_type="decision_tree")
+            if info:
+                # Buscar artifact_fs_id o artifact_fs_id_model
+                fs_id = info.get("artifact_fs_id_model") or info.get("artifact_fs_id")
+                if fs_id and _download_from_gridfs(MODEL_CACHE_PATH, fs_id):
+                    _model_cache_ml = joblib.load(MODEL_CACHE_PATH)
+                    _model_meta_ml.update({"source": "gridfs", "path": MODEL_CACHE_PATH, "run_id": info.get("run_id")})
+                    return _model_cache_ml
+            
+            # Fallback: intenta desde alias local
+            alias = info.get("artifact_alias_model") or info.get("artifact_alias") if info else None
+            if alias and os.path.exists(alias):
+                _model_cache_ml = joblib.load(alias)
+                _model_meta_ml.update({"source": "alias", "path": alias, "run_id": info.get("run_id") if info else None})
+                return _model_cache_ml
+            
+            raise HTTPException(status_code=500, detail="No se puede cargar el modelo ML (archivo/GridFS no disponibles).")
+    return _model_cache_ml
+
+
+def predict_one_ml(payload: dict) -> dict:
+    """Predice usando Decision Tree (ML clásico)."""
+    model = load_model_ml()
+    X = pd.DataFrame([payload])
+    
+    # Aplicar featurización si el modelo lo requiere
+    try:
+        from integrations.featurize import featurize_df
+        X = featurize_df(X)
+    except Exception:
+        pass
+    
+    # Convertir categorías (object dtype) a numéricas o droparlas
+    # Mantener solo columnas numéricas/booleanas que el modelo espera
+    numeric_cols = X.select_dtypes(include=['int64', 'int32', 'float64', 'float32', 'bool']).columns
+    X = X[numeric_cols]
+    
+    yhat = model.predict(X)[0]
+    proba_yes = float(model.predict_proba(X)[0][1]) if hasattr(model, "predict_proba") else None
+    
+    return {
+        "Prediction": "yes" if yhat == 1 else "no",
+        "Probability_yes": proba_yes
+    }
+
+
+# ============================================================================
+# DEEP LEARNING (Neural Network) - FUNCIONES
+# ============================================================================
+
+def load_model_dl():
+    """Carga el modelo Deep Learning más reciente (Keras/TensorFlow) + Scaler + Preprocessor desde GridFS."""
+    global _model_cache_dl, _scaler_cache_dl, _encoder_cache_dl, _model_meta_dl
+    
+    if _model_cache_dl is None:
+        try:
+            import tensorflow as tf
+            from tensorflow import keras
+        except ImportError:
+            raise HTTPException(status_code=500, detail="TensorFlow no está instalado. Instala: pip install tensorflow keras")
+        
+        # Obtener info del modelo Deep Learning más reciente
+        from integrations.mongo_repo import latest_artifact_info_by_type
+        info = latest_artifact_info_by_type(model_type="deep_learning")
+        
+        if not info:
+            raise HTTPException(status_code=404, detail="No hay modelo Deep Learning entrenado en la BD.")
+        
+        # ===== Carga del Modelo DL =====
+        model_path = DEEPLEARNING_MODEL_PATH
+        if os.path.exists(model_path):
+            # Usar archivo local si existe
+            try:
+                _model_cache_dl = keras.models.load_model(model_path)
+                _model_meta_dl.update({"source": "file", "path": model_path, "run_id": info.get("run_id")})
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Error cargando modelo DL local: {e}")
+        else:
+            # Intentar descargar desde GridFS
+            fs_id_model = info.get("artifact_fs_id_model")
+            if fs_id_model:
+                try:
+                    if _download_from_gridfs(DEEPLEARNING_MODEL_CACHE_PATH, fs_id_model):
+                        _model_cache_dl = keras.models.load_model(DEEPLEARNING_MODEL_CACHE_PATH)
+                        _model_meta_dl.update({"source": "gridfs", "path": DEEPLEARNING_MODEL_CACHE_PATH, "run_id": info.get("run_id")})
+                    else:
+                        raise HTTPException(status_code=404, detail="No se pudo descargar el modelo DL desde GridFS.")
+                except Exception as e:
+                    raise HTTPException(status_code=500, detail=f"Error descargando modelo DL: {e}")
+            else:
+                raise HTTPException(status_code=404, detail="No hay artifact_fs_id_model en la BD para Deep Learning.")
+        
+        # ===== Carga del Preprocessor (Scaler) =====
+        scaler_path = DEEPLEARNING_SCALER_PATH
+        if os.path.exists(scaler_path):
+            _scaler_cache_dl = joblib.load(scaler_path)
+        else:
+            # Intentar descargar desde GridFS
+            fs_id_preprocessor = info.get("artifact_fs_id_preprocessor")
+            if fs_id_preprocessor:
+                try:
+                    if _download_from_gridfs(DEEPLEARNING_SCALER_CACHE_PATH, fs_id_preprocessor):
+                        _scaler_cache_dl = joblib.load(DEEPLEARNING_SCALER_CACHE_PATH)
+                    else:
+                        raise HTTPException(status_code=404, detail="No se pudo descargar el preprocessor desde GridFS.")
+                except Exception as e:
+                    raise HTTPException(status_code=500, detail=f"Error descargando preprocessor: {e}")
+            else:
+                raise HTTPException(status_code=404, detail="No hay artifact_fs_id_preprocessor en la BD para Deep Learning.")
+        
+        # ===== Carga del Encoder (Categorías) - Opcional =====
+        encoder_path = DEEPLEARNING_ENCODER_PATH
+        if os.path.exists(encoder_path):
+            try:
+                _encoder_cache_dl = joblib.load(encoder_path)
+            except Exception:
+                _encoder_cache_dl = None
+        else:
+            # El encoder es opcional, puede no existir
+            _encoder_cache_dl = None
+    
+    return _model_cache_dl, _scaler_cache_dl, _encoder_cache_dl
+
+
+def predict_one_dl(payload: dict) -> dict:
+    """Predice usando Deep Learning (Neural Network)."""
+    model, scaler, encoder = load_model_dl()
+    X = pd.DataFrame([payload])
+    
+    # Aplicar featurización
+    try:
+        from integrations.featurize import featurize_df
+        X = featurize_df(X)
+    except Exception:
+        pass
+    
+    # Convertir categorías (object dtype) a numéricas o droparlas
+    # Mantener solo columnas numéricas/booleanas
+    numeric_cols = X.select_dtypes(include=['int64', 'int32', 'float64', 'float32', 'bool']).columns
+    X = X[numeric_cols]
+    
+    # Normalizar usando el scaler entrenado
+    if scaler is not None:
+        X_scaled = scaler.transform(X)
+    else:
+        X_scaled = X.values
+    
+    # Hacer predicción
+    proba = model.predict(X_scaled, verbose=0)[0]
+    proba_yes = float(proba[1]) if len(proba) > 1 else float(proba[0])
+    yhat = 1 if proba_yes >= 0.5 else 0
+    
+    return {
+        "Prediction": "yes" if yhat == 1 else "no",
+        "Probability_yes": proba_yes
+    }
+
+
+# ============================================================================
+# FUNCIONES PÚBLICAS - WRAPPER PRINCIPAL
+# ============================================================================
+
+def predict_one(payload: dict, model_type: str = "decision_tree") -> dict:
+    """
+    Predice usando el modelo especificado.
+    
+    Args:
+        payload: diccionario con los datos del cliente
+        model_type: "decision_tree" o "deep_learning"
+    
+    Returns:
+        dict con predicción y probabilidad
+    """
+    if model_type == "decision_tree":
+        return predict_one_ml(payload)
+    elif model_type == "deep_learning":
+        return predict_one_dl(payload)
+    else:
+        raise ValueError(f"Tipo de modelo no reconocido: {model_type}. Usa 'decision_tree' o 'deep_learning'.")
+
+
+def refresh_model(run_id: str = None, model_type: str = "decision_tree") -> dict:
+    """Fuerza la recarga del modelo desde GridFS."""
+    global _model_cache_ml, _model_cache_dl, _scaler_cache_dl, _encoder_cache_dl, _model_meta_ml, _model_meta_dl
+    
+    if model_type == "decision_tree":
+        _model_cache_ml = None
+        _model_meta_ml = {"source": None, "path": None, "run_id": None}
+        model = load_model_ml()
+        return _model_meta_ml
+    elif model_type == "deep_learning":
+        _model_cache_dl = None
+        _scaler_cache_dl = None
+        _encoder_cache_dl = None
+        _model_meta_dl = {"source": None, "path": None, "run_id": None}
+        load_model_dl()
+        return _model_meta_dl
+    else:
+        raise ValueError(f"Tipo de modelo no reconocido: {model_type}")
 
 
 def model_info() -> dict:
-    """Devuelve info básica del modelo cargado/cargable."""
-    exists_file = os.path.exists(PIPELINE_PATH)
-    exists_cache = os.path.exists(MODEL_CACHE_PATH)
-    return {
-        "source": _model_meta.get("source"),
-        "path": _model_meta.get("path"),
-        "run_id": _model_meta.get("run_id"),
-        "pipeline_path": PIPELINE_PATH,
-        "pipeline_exists": exists_file,
-        "cache_path": MODEL_CACHE_PATH,
-        "cache_exists": exists_cache,
-        "loaded": _model_cache is not None,
+    """Devuelve info básica de ambos modelos."""
+    ml_info = {
+        "decision_tree": {
+            "source": _model_meta_ml.get("source"),
+            "path": _model_meta_ml.get("path"),
+            "run_id": _model_meta_ml.get("run_id"),
+            "pipeline_path": PIPELINE_PATH,
+            "pipeline_exists": os.path.exists(PIPELINE_PATH),
+            "cache_path": MODEL_CACHE_PATH,
+            "cache_exists": os.path.exists(MODEL_CACHE_PATH),
+            "loaded": _model_cache_ml is not None,
+        }
     }
+    
+    dl_info = {
+        "deep_learning": {
+            "model_path": DEEPLEARNING_MODEL_PATH,
+            "model_exists": os.path.exists(DEEPLEARNING_MODEL_PATH),
+            "scaler_path": DEEPLEARNING_SCALER_PATH,
+            "scaler_exists": os.path.exists(DEEPLEARNING_SCALER_PATH),
+            "encoder_path": DEEPLEARNING_ENCODER_PATH,
+            "encoder_exists": os.path.exists(DEEPLEARNING_ENCODER_PATH),
+            "model_loaded": _model_cache_dl is not None,
+            "scaler_loaded": _scaler_cache_dl is not None,
+            "encoder_loaded": _encoder_cache_dl is not None,
+        }
+    }
+    
+    return {**ml_info, **dl_info}
 
-def predict_one(payload: dict):
-    model = load_model()
-    X = pd.DataFrame([payload])
-    yhat = model.predict(X)[0]
-    proba_yes = float(model.predict_proba(X)[0][1]) if hasattr(model, "predict_proba") else None
-    return {"Prediction": "yes" if yhat == 1 else "no", "Probability_yes": proba_yes}
