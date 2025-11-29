@@ -6,10 +6,13 @@ pydantic==2.9.2
 pymongo
 python-dotenv
 
-# --- Machine Learning ---
+# --- Machine Learning (Decision Tree) ---
 scikit-learn==1.4.2
 pandas==2.2.2
 numpy==1.26.4
 scipy==1.11.4
 joblib==1.4.2
 threadpoolctl==3.5.0
+
+# --- Deep Learning ---
+tensorflow==2.17.0
