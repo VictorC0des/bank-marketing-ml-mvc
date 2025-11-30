@@ -119,25 +119,36 @@ def predict_one_ml(payload: dict) -> dict:
     model = load_model_ml()
     X = pd.DataFrame([payload])
     
-    # Aplicar featurización si el modelo lo requiere
+    # NO aplicar featurización - el modelo fue entrenado con columnas originales
+    # Solo mantener las columnas que el modelo espera
+    
     try:
-        from integrations.featurize import featurize_df
-        X = featurize_df(X)
-    except Exception:
-        pass
-    
-    # Convertir categorías (object dtype) a numéricas o droparlas
-    # Mantener solo columnas numéricas/booleanas que el modelo espera
-    numeric_cols = X.select_dtypes(include=['int64', 'int32', 'float64', 'float32', 'bool']).columns
-    X = X[numeric_cols]
-    
-    yhat = model.predict(X)[0]
-    proba_yes = float(model.predict_proba(X)[0][1]) if hasattr(model, "predict_proba") else None
-    
-    return {
-        "Prediction": "yes" if yhat == 1 else "no",
-        "Probability_yes": proba_yes
-    }
+        yhat = model.predict(X)[0]
+        proba_yes = float(model.predict_proba(X)[0][1]) if hasattr(model, "predict_proba") else None
+        
+        return {
+            "Prediction": "yes" if yhat == 1 else "no",
+            "Probability_yes": proba_yes
+        }
+    except Exception as e:
+        # Si falla, intentar con featurización
+        try:
+            from integrations.featurize import featurize_df
+            X = featurize_df(X)
+            numeric_cols = X.select_dtypes(include=['int64', 'int32', 'float64', 'float32', 'bool']).columns.tolist()
+            X = X[numeric_cols]
+            
+            yhat = model.predict(X)[0]
+            proba_yes = float(model.predict_proba(X)[0][1]) if hasattr(model, "predict_proba") else None
+            
+            return {
+                "Prediction": "yes" if yhat == 1 else "no",
+                "Probability_yes": proba_yes
+            }
+        except Exception as e2:
+            raise HTTPException(status_code=400, detail=f"Error en predicción: {str(e2)}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error en predicción del modelo: {str(e)}")
 
 
 # ============================================================================
@@ -177,10 +188,21 @@ def load_model_dl():
             if fs_id_model:
                 try:
                     if _download_from_gridfs(DEEPLEARNING_MODEL_CACHE_PATH, fs_id_model):
-                        _model_cache_dl = keras.models.load_model(DEEPLEARNING_MODEL_CACHE_PATH)
-                        _model_meta_dl.update({"source": "gridfs", "path": DEEPLEARNING_MODEL_CACHE_PATH, "run_id": info.get("run_id")})
+                        # Intentar cargar como joblib primero (Keras/TF modelos frecuentemente se guardan así)
+                        try:
+                            _model_cache_dl = joblib.load(DEEPLEARNING_MODEL_CACHE_PATH)
+                            _model_meta_dl.update({"source": "gridfs", "format": "joblib", "path": DEEPLEARNING_MODEL_CACHE_PATH, "run_id": info.get("run_id")})
+                        except Exception:
+                            # Si joblib falla, intentar como H5
+                            try:
+                                _model_cache_dl = keras.models.load_model(DEEPLEARNING_MODEL_CACHE_PATH)
+                                _model_meta_dl.update({"source": "gridfs", "format": "h5", "path": DEEPLEARNING_MODEL_CACHE_PATH, "run_id": info.get("run_id")})
+                            except Exception as e_h5:
+                                raise HTTPException(status_code=500, detail=f"Error cargando modelo DL (probado joblib y h5): {e_h5}")
                     else:
                         raise HTTPException(status_code=404, detail="No se pudo descargar el modelo DL desde GridFS.")
+                except HTTPException:
+                    raise
                 except Exception as e:
                     raise HTTPException(status_code=500, detail=f"Error descargando modelo DL: {e}")
             else:
@@ -219,37 +241,54 @@ def load_model_dl():
 
 
 def predict_one_dl(payload: dict) -> dict:
-    """Predice usando Deep Learning (Neural Network)."""
-    model, scaler, encoder = load_model_dl()
+    """Predice usando Deep Learning. Soporta modelos Keras/TF y scikit-learn MLPClassifier."""
+    try:
+        model, scaler, encoder = load_model_dl()
+    except HTTPException as e:
+        # Si el modelo DL no está disponible, retornar error informativo
+        raise HTTPException(status_code=503, detail=f"Modelo Deep Learning no disponible: {e.detail}")
+    
     X = pd.DataFrame([payload])
     
-    # Aplicar featurización
+    # Aplicar featurización (NECESARIA para Deep Learning - espera 67 features)
     try:
         from integrations.featurize import featurize_df
         X = featurize_df(X)
-    except Exception:
-        pass
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error en featurización: {str(e)}")
     
-    # Convertir categorías (object dtype) a numéricas o droparlas
-    # Mantener solo columnas numéricas/booleanas
-    numeric_cols = X.select_dtypes(include=['int64', 'int32', 'float64', 'float32', 'bool']).columns
-    X = X[numeric_cols]
+    # Aplicar el scaler (ColumnTransformer) que hace one-hot encoding
+    try:
+        if scaler is not None:
+            X_scaled = scaler.transform(X)
+        else:
+            # Si no hay scaler, seleccionar solo columnas numéricas
+            numeric_cols = X.select_dtypes(include=['int64', 'int32', 'float64', 'float32', 'bool']).columns
+            X_scaled = X[numeric_cols].values
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error escalando features: {str(e)}")
     
-    # Normalizar usando el scaler entrenado
-    if scaler is not None:
-        X_scaled = scaler.transform(X)
-    else:
-        X_scaled = X.values
-    
-    # Hacer predicción
-    proba = model.predict(X_scaled, verbose=0)[0]
-    proba_yes = float(proba[1]) if len(proba) > 1 else float(proba[0])
-    yhat = 1 if proba_yes >= 0.5 else 0
-    
-    return {
-        "Prediction": "yes" if yhat == 1 else "no",
-        "Probability_yes": proba_yes
-    }
+    try:
+        # Detectar tipo de modelo
+        model_type_name = type(model).__name__
+        
+        if model_type_name == 'MLPClassifier':
+            # scikit-learn MLPClassifier
+            proba = model.predict_proba(X_scaled)[0]
+            proba_yes = float(proba[1]) if len(proba) > 1 else float(proba[0])
+        else:
+            # Keras/TensorFlow model
+            proba = model.predict(X_scaled, verbose=0)[0]
+            proba_yes = float(proba[1]) if len(proba) > 1 else float(proba[0])
+        
+        yhat = 1 if proba_yes >= 0.5 else 0
+        
+        return {
+            "Prediction": "yes" if yhat == 1 else "no",
+            "Probability_yes": proba_yes
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error en predicción del modelo DL: {str(e)}")
 
 
 # ============================================================================
